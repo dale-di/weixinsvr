@@ -25,8 +25,8 @@ replytid            = 微信公众号的模板消息id，用于命令执行结�
 [actionacl] #访问控制。定义action中定义的动作，允许谁执行
 svr= 用户的openid,用户的openid
 [action] #定义允许执行的命令
-\#命令名称=主机名,格式化的命令字符串。args数组是程序定义好的，此处不能更改。
-\#args的顺序按照微信输入的参数顺序使用。
+#命令名称=主机名,格式化的命令字符串。args数组是程序定义好的，此处不能更改。
+#args的顺序按照微信输入的参数顺序使用。
 svr=memc,"service %s %s" % (args[0],args[1])
 tt=memc,"ls %s" % (args[0])
 [shortkey] # args中的内容缩写对照表，便于微信端输入。
