@@ -314,8 +314,8 @@ def checkpermission(user, action):
     if "admin" in confitem:
         if user in confitem["admin"]:
             return True
-    if acl in confitem["acl"]:
-        if user in confitem["acl"][acl]:
+    if action in confitem["acl"]:
+        if user in confitem["acl"][action]:
             return True
     return False
 
