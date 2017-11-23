@@ -27,14 +27,9 @@ svr= 用户的openid,用户的openid
 [action] #定义允许执行的命令
 #命令名称=主机名,格式化的命令字符串。args数组是程序定义好的，此处不能更改。
 #args的顺序按照微信输入的参数顺序使用。
-svr=memc,"service %s %s" % (args[0],args[1])
-tt=memc,"ls %s" % (args[0])
+#可以自行在subtask函数里定义允许哪些action，目前统一了ansible功能。
 [shortkey] # args中的内容缩写对照表，便于微信端输入。
 memc=memcached
 r=restart
 </pre></code>
 
-## 举例说明（以上面的配置为例）：
-在微信端输入：svr memc r。实际执行的命令是：service memcached restart。
-因为svr对应[action]中的svr配置：host是memc，cmd为"service %s %s" % (args[0],args[1])。
-输入的参数memc和r，分别在shortkey中找到对应关系并进行替换：args[0]="memcached",args[1]="restart"
