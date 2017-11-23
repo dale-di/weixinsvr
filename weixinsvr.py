@@ -331,8 +331,8 @@ def subtask(user,taskinfo):
         if result["code"] != 0:
             payload['data']['first']["value"] = "执行失败"
             payload['data']['keyword2']["value"] = result["msg"]
-    elif actionName == "cn":
-        result = actioncmd("/data/scripts/cn %s %s" % (actionArgs[0],actionArgs[1]))
+    elif actionName == "cl":
+        result = actioncmd("/data/scripts/cl %s %s" % (actionArgs[0],actionArgs[1]))
         if result["code"] != 0:
             payload['data']['first']["value"] = "执行失败"
             payload['data']['keyword2']["value"] = result["code"]
