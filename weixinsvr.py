@@ -15,31 +15,54 @@ import hashlib
 import json
 import ConfigParser
 import subprocess
+from pwd import getpwnam
 from WXBizMsgCrypt import WXBizMsgCrypt
 import xml.etree.cElementTree as ET
 from multiprocessing import Process,Value
+#from ucloud.sdk import UcloudApiClient
 from collections import namedtuple
-from ansible.plugins.callback import CallbackBase
-from ansible.parsing.dataloader import DataLoader
-from ansible.vars import VariableManager
-from ansible.inventory import Inventory
-from ansible.playbook.play import Play
-from ansible.executor.task_queue_manager import TaskQueueManager
+import traceback
+
 
 Token = {}
 Token['time'] = 0
 Token['expire'] = 0
 DEBUG = 0
+ansibleResult = {}
 
 TaskRun = Value('i',0)
-
 MyOption = dict(port = 5005,
                  cookie = 'cliuser',
                  cookie_secret = 'cAjcCxYYiHFpi12YmkghlQUy6yNUkPxqV0MrE9s0g20XTvbaYZrCtm023NlGhMh6',
-                 logfile = '/data/logs/weixin/weixinsvr.log',
+                 logfile = '/data/log/weixin/weixinsvr.log',
+                 run_user = 'nobody',
                  login_expired = 10,
-                 pidfile = '/data/logs/weixin/weixinsvr.pid',
+                 pidfile = '/data/log/weixin/weixinsvr.pid',
                  )
+logger = logging.getLogger()
+loghl = logging.handlers.RotatingFileHandler(MyOption['logfile'], maxBytes=104857600, backupCount=30)
+fmt =  logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+loghl.setFormatter(fmt)
+logger.addHandler(loghl)
+if DEBUG == 0:
+    logger.setLevel(logging.INFO)
+else:
+    logger.setLevel(logging.DEBUG)
+    #synclogger.setLevel(logging.DEBUG)
+os.environ['USER'] = 'dale'
+#logger.info(os.environ)
+#通过fork+setuid切换运行身份时，ansible始终认为运行环境是root，造成权限失败。
+from ansible.parsing.dataloader import DataLoader
+from ansible.vars.manager import VariableManager
+from ansible.inventory.manager import InventoryManager
+from ansible.playbook.play import Play
+from ansible.executor.task_queue_manager import TaskQueueManager
+from ansible.plugins.callback import CallbackBase
+
+
+SvrName = dict(memc = "memcached")
+SvrAction = dict(r = "restart", a = "start", o = "stop", l = "reload")
+
 def daemonize (stdin='/dev/null', stdout='/dev/null', stderr='/dev/null', pidfile=None, uid=99):
     ''' Fork the current process as a daemon, redirecting standard file
         descriptors (by default, redirects them to /dev/null).
@@ -65,8 +88,7 @@ def daemonize (stdin='/dev/null', stdout='/dev/null', stderr='/dev/null', pidfil
     os.chdir("/")
     os.umask(022)
     os.setsid()
-    if uid > 0:
-        os.setuid(uid)
+    #os.setuid(uid)
     # Perform second fork.
     try:
         pid = os.fork()
@@ -89,7 +111,7 @@ def daemonize (stdin='/dev/null', stdout='/dev/null', stderr='/dev/null', pidfil
 
 def exit_handler(signum,frame):
     tornado.ioloop.IOLoop.instance().stop()
-    os.remove(MyOption['pidfile'])
+    #os.remove(MyOption['pidfile'])
 
 class WeiXin():
     def __init__(self,appid,secret):
@@ -197,10 +219,10 @@ class WeixinHandler(tornado.web.RequestHandler):
                 (payload['touser'],
                 payload['url'], payload['data']['first']["value"],
                 payload['data']['keyword1']["value"],
-                weixin.get_info()))
+                ))
             if not r:
                 self.set_status(505)
-            self.write("%s\n" % weixin.get_info())
+            self.write("OK\n")
         elif op == "users":
             self.write(weixin.get_openid())
         elif op == "userinfo":
@@ -285,26 +307,38 @@ def subtask(user,taskinfo):
     if not checkpermission(user, actionName):
         TaskRun.value -= 1
         return
-    logger.info("begin")
-    action = confitem["action"].get(actionName,"no")
-    if action == "no":
-        logger.error("invalid action: %s" % actionName)
-        TaskRun.value -= 1
-        return
-    args = []
-    for arg in actionArgs:
-        args.append(confitem["shortkey"].get(arg,arg))
-    cmd = eval(action["cmd"])
-    result = {}
-    if action["host"] == "localhost":
-        result = actioncmd(cmd)
-    else:
-        result = actionssh(action["host"], cmd)
-    if result["code"] != 0:
-        payload['data']['first']["value"] = "执行失败"
-        payload['data']['keyword2']["value"] = result["code"]
-        payload['data']['remark']["value"] = result["msg"]
-        logger.error("[%s] cmd: %s; result: %s" % (action["host"],cmd,result))
+    logger.info("begin subtask: %s" % tinfo)
+    if actionName == "bw":
+        response = actionBw(tinfo[1:])
+        if response["code"] != 0:
+            payload['data']['first']["value"] = "执行失败"
+            payload['data']['keyword2']["value"] = response["msg"]
+    elif actionName == "ssh":
+        response = actionssh(tinfo[1]," ".join(tinfo[2:]))
+        if response["code"] != 0:
+            payload['data']['first']["value"] = "执行失败"
+            payload['data']['keyword2']["value"] = response["code"]
+        payload['data']['remark']['value'] = response["msg"]
+    elif actionName == "svr":
+        shortSvrName = tinfo[1]
+        shortSvrAction = tinfo[2]
+        svrname = SvrName.get(shortSvrName, shortSvrName)
+        svraction = SvrAction.get(shortSvrAction, shortSvrAction)
+        if svrname == "memcached":
+            result = actionssh('memc', "service %s %s" % (svrname,svraction))
+        else:
+            result = actioncmd("service %s %s" % (svrname,svraction))
+        if result["code"] != 0:
+            payload['data']['first']["value"] = "执行失败"
+            payload['data']['keyword2']["value"] = result["msg"]
+    elif actionName == "cn":
+        result = actioncmd("/data/scripts/cn %s %s" % (actionArgs[0],actionArgs[1]))
+        if result["code"] != 0:
+            payload['data']['first']["value"] = "执行失败"
+            payload['data']['keyword2']["value"] = result["code"]
+        payload['data']['remark']['value'] = result["msg"]
+    elif actionName == "test":
+        payload['data']['first']["value"] = "执行成功"
     r = weixin.send(payload)
     if not r:
         logger.error("task failed: %s\n" % taskinfo)
@@ -314,8 +348,8 @@ def checkpermission(user, action):
     if "admin" in confitem:
         if user in confitem["admin"]:
             return True
-    if action in confitem["acl"]:
-        if user in confitem["acl"][action]:
+    if action in confitem:
+        if user in confitem[action]:
             return True
     return False
 
@@ -324,41 +358,39 @@ class ResultCallback(CallbackBase):
     CALLBACK_VERSION = 2.0
     CALLBACK_TYPE = 'notification'
     CALLBACK_NAME = 'ResultCallback'
-    def __init__(self,ansibleResult):
+    def __init__(self):
 
         self._play = None
         self._last_task_banner = None
-        self.ansibleResult = ansibleResult
-        self.ansibleResult["stderr"] = {}
-        self.ansibleResult["stdout"] = {}
         super(ResultCallback, self).__init__()
 
     def v2_runner_on_failed(self, result, ignore_errors=False):
-        if result._host.name not in self.ansibleResult:
-            self.ansibleResult["stderr"][result._host.name] = {}
-        self.ansibleResult["stderr"][result._host.name] = result._result
+        if result._host.name not in ansibleResult:
+            ansibleResult[result._host.name] = {}
+        ansibleResult[result._host.name] = result._result
 
     def v2_runner_on_ok(self, result):
-        if result._host.name not in self.ansibleResult:
-            self.ansibleResult["stdout"][result._host.name] = {}
-        self.ansibleResult["stdout"][result._host.name] = result._result["stdout_lines"]
+        if result._host.name not in ansibleResult:
+            ansibleResult[result._host.name] = {}
+        logger.info(result._result)
+        ansibleResult[result._host.name] = result._result["stdout_lines"]
 
-def ansiblev2(play_source,result):
+def ansiblev2(play_source):
     Options = namedtuple('Options', ['connection', 'module_path', 'forks', 'become',
-                        'become_method', 'become_user', 'check'])
+                        'become_method', 'become_user', 'check','diff'])
     # initialize needed objects
-    variable_manager = VariableManager()
     loader = DataLoader()
-    options = Options(connection='ssh', module_path='/path/to/mymodules', forks=10,
-                become=True, become_method='sudo', become_user='root', check=False)
+    options = Options(connection='ssh', module_path='/data/scripts', forks=10,
+                become=True, become_method='sudo', become_user='root', check=False,
+                diff=False)
     # create inventory and pass to var manager
-    inventory = Inventory(loader=loader, variable_manager=variable_manager,
-                        host_list='/etc/ansible/hosts')
-    variable_manager.set_inventory(inventory)
+
+    inventory = InventoryManager(loader=loader, sources=['/etc/ansible/hosts'])
+    variable_manager = VariableManager(loader=loader, inventory=inventory)
     play = Play().load(play_source, variable_manager=variable_manager, loader=loader)
+
     tqm = None
-    runresult = {}
-    results_callback = ResultCallback(runresult)
+    results_callback = ResultCallback()
     try:
         tqm = TaskQueueManager(
               inventory=inventory,
@@ -368,10 +400,10 @@ def ansiblev2(play_source,result):
               passwords=None,
               stdout_callback=results_callback,
         )
-        result["code"] = tqm.run(play)
-        result["msg"] = "%s" % runresult["stdout"]
-        result["err"] = "%s" % runresult["stderr"]
-        return 
+        result = tqm.run(play)
+        return result
+    except:
+        logger.info(traceback.print_exc())
     finally:
         if tqm is not None:
             tqm.cleanup()
@@ -379,16 +411,20 @@ def ansiblev2(play_source,result):
 def actionssh(host, cmd):
     play_source = dict(
         hosts = host,
+        remote_user = 'dale',
         gather_facts = 'no',
         tasks = [
-            dict(name='cmd runing',action=dict(module='shell',args='%s' % cmd))
+            dict(name='cmd runing',action=dict(module='script',args='/data/scripts/%s' % cmd))
         ]
     )
-    r = dict(code = 0, msg = "OK")
-    ansiblev2(play_source,r)
-    #logger.info(r)
+    r = dict(RetCode = 0, msg = "OK")
+    r["code"]=ansiblev2(play_source)
     if r['code'] != 0:
-        logger.error("actionssh host: %s; cmd: %s; result: %s" % (host, cmd, r))
+        logger.error("actionssh host: %s; cmd: %s; result: %d; info: %s" % (host, cmd, r['code'],ansibleResult))
+    r['msg'] = json.dumps(ansibleResult,indent=2,ensure_ascii=False)
+    #else:
+    #    for k,v in ansibleResult.iteritems():
+    #        r['msg'] = '%s%s: %s\n' % (r['msg'],k,v)
     return r
 
 def actioncmd(args):
@@ -423,8 +459,19 @@ if __name__ == "__main__":
             sys.exit()
         elif o == '-c':
             conf = os.path.abspath(a)
+    daemonize('/dev/null','/data/log/weixin/weixinsvr.out','/data/log/weixin/weixinsvr.err',MyOption['pidfile'])
     config = ConfigParser.ConfigParser()
     config.read(conf)
+    # global run_user
+    # try:
+    #     run_user = config.get('default', 'user')
+    # except:
+    #     run_user = MyOption['run_user']
+    # try:
+    #     uid = getpwnam(run_user).pw_uid
+    # except:
+    #     print "not have user: %s" % run_user
+    #     sys.exit(1)
     global weixin, confitem
     confitem = {}
     try:
@@ -438,16 +485,15 @@ if __name__ == "__main__":
         print e
         sys.exit(1)
     try:
-        acls = config.items("actionacl")
+        actions = config.items("action")
     except:
         pass
     else:
-        confitem["acl"] = {}
-        for item in acls:
-            aclname =item[0]
-            confitem["acl"][aclname] = {}
+        for item in actions:
+            action =item[0]
+            confitem[action] = {}
             for user in item[1].split(","):
-                confitem["acl"][aclname][user] = 1
+                confitem[action][user] = 1
     try:
         admins = config.get('default', 'admin')
     except:
@@ -456,41 +502,11 @@ if __name__ == "__main__":
         confitem["admin"] = {}
         for admin in admins.split(','):
             confitem["admin"][admin] = "yes"
-    try:
-        actions = config.items('action')
-    except:
-        pass
-    else:
-        confitem["action"] = {}
-        for item in actions:
-            name = item[0]
-            t = item[1].find(",")
-            if t >= 0:
-                confitem["action"][name] = {"host": item[1][:t],"cmd": item[1][t+1:]}
-    try:
-        shortkeys = config.items('shortkey')
-    except:
-        pass
-    else:
-        confitem["shortkey"] = {}
-        for item in shortkeys:
-            name = item[0]
-            confitem["shortkey"][name] = item[1]
-    daemonize('/dev/null','/tmp/weixinsvr.out','/tmp/weixinsvr.err',MyOption['pidfile'],0)
-    global logger
-    logger = logging.getLogger()
-    loghl = logging.handlers.RotatingFileHandler(MyOption['logfile'], maxBytes=104857600, backupCount=30)
-    fmt =  logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
-    loghl.setFormatter(fmt)
-    logger.addHandler(loghl)
-    if DEBUG == 0:
-        logger.setLevel(logging.INFO)
-    else:
-        logger.setLevel(logging.DEBUG)
-        #synclogger.setLevel(logging.DEBUG)
+    #global logger
     signal.signal(signal.SIGTERM,exit_handler)
     signal.signal(signal.SIGQUIT,exit_handler)
-
+    #os.environ['HOME'] = getpwnam(run_user).pw_dir
+    #os.environ['USERNAME'] = run_user
     weixin = WeiXin(confitem["appid"],secret)
     http_server = tornado.httpserver.HTTPServer(Application())
     http_server.listen(int(MyOption['port']),'127.0.0.1')
