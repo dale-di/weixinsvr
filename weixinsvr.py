@@ -436,7 +436,7 @@ def ansiblev2(play_source):
 def actionssh(host, cmd):
     play_source = dict(
         hosts = host,
-        remote_user = 'dale',
+        remote_user = confitem["remote_user"],
         gather_facts = 'no',
         tasks = [
             dict(
