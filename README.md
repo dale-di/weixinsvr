@@ -8,7 +8,11 @@ sendwx.sh是微信发送脚本，此脚本是以zabbix报警格式编写，因�
 * 安全问题是利用微信回调参数的加密及基于openid的访问控制。
 * 利用缩写对照表来对输入进行过滤。
 * 发送命令后，分两步：首先会收到命令提交是否成功的回复；然后等命令执行完成后，会有执行结果的回复
-*
+
+## action（脚本）使用说明：利用ansible在目标主机执行或在本地执行。
+* 通过ansible执行的action。action查找目录：/data/scripts。微信命令发送方式为：ssh actionname args
+* 本地执行的action。action查找目录：/data/scripts/locahost。微信命令发送方式：actionname args
+* 由于是通过微信发送命令，因此action的名称和参数尽量简单，便于输入。
 
 
 ## weixin.conf配置说明：
@@ -22,14 +26,7 @@ template_id = 微信公众号的模板消息id，用于报警信息使用
 token               = 微信公众号号的服务器配置中的“令牌”
 encodingAESKey      = 微信公众号号的服务器配置中的“消息加解密密钥”
 replytid            = 微信公众号的模板消息id，用于命令执行结果的通知
-[actionacl] #访问控制。定义action中定义的动作，允许谁执行
+[action] #访问控制。定义action中定义的动作，允许谁执行
+\#svr是脚本名称。
 svr= 用户的openid,用户的openid
-[action] #定义允许执行的命令
-#命令名称=主机名,格式化的命令字符串。args数组是程序定义好的，此处不能更改。
-#args的顺序按照微信输入的参数顺序使用。
-#可以自行在subtask函数里定义允许哪些action，目前统一了ansible功能。
-[shortkey] # args中的内容缩写对照表，便于微信端输入。
-memc=memcached
-r=restart
 </pre></code>
-
