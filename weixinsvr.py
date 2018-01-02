@@ -21,6 +21,7 @@ import xml.etree.cElementTree as ET
 from multiprocessing import Process,Value
 #from ucloud.sdk import UcloudApiClient
 from collections import namedtuple
+from stat import *
 import traceback
 
 
@@ -29,6 +30,7 @@ Token['time'] = 0
 Token['expire'] = 0
 DEBUG = 0
 ansibleResult = {}
+conf = "no"
 
 TaskRun = Value('i',0)
 MyOption = dict(port = 5005,
@@ -49,7 +51,6 @@ if DEBUG == 0:
 else:
     logger.setLevel(logging.DEBUG)
     #synclogger.setLevel(logging.DEBUG)
-os.environ['USER'] = 'dale'
 #logger.info(os.environ)
 #通过fork+setuid切换运行身份时，ansible始终认为运行环境是root，造成权限失败。
 from ansible.parsing.dataloader import DataLoader
@@ -58,10 +59,6 @@ from ansible.inventory.manager import InventoryManager
 from ansible.playbook.play import Play
 from ansible.executor.task_queue_manager import TaskQueueManager
 from ansible.plugins.callback import CallbackBase
-
-
-SvrName = dict(memc = "memcached")
-SvrAction = dict(r = "restart", a = "start", o = "stop", l = "reload")
 
 def daemonize (stdin='/dev/null', stdout='/dev/null', stderr='/dev/null', pidfile=None, uid=99):
     ''' Fork the current process as a daemon, redirecting standard file
@@ -112,6 +109,18 @@ def daemonize (stdin='/dev/null', stdout='/dev/null', stderr='/dev/null', pidfil
 def exit_handler(signum,frame):
     tornado.ioloop.IOLoop.instance().stop()
     #os.remove(MyOption['pidfile'])
+def action_handler(signum,frame):
+    config = ConfigParser.ConfigParser()
+    config.read(conf)
+    try:
+        actions = config.items("action")
+    except:
+        pass
+    else:
+        confitem["action"] = {}
+        for item in actions:
+            action =item[0]
+            confitem["action"][action] = item[1].split(',')
 
 class WeiXin():
     def __init__(self,appid,secret):
@@ -166,7 +175,7 @@ class WeiXin():
 class Application(tornado.web.Application):
     def __init__(self):
         handlers = [
-            (r"/weixin/(send|users|userinfo|token|mon)", WeixinHandler),
+            (r"/weixin/(send|users|userinfo|token|mon|action|actionlist)", WeixinHandler),
             (r"/weixinsvr", WeiXinSvrHandler),
         ]
         settings = dict(
@@ -196,6 +205,18 @@ class WeixinHandler(tornado.web.RequestHandler):
     def get(self, op):
         if op == "mon":
             self.write("OK")
+        elif op == "actionlist":
+            msg = ""
+            for k,v in confitem["action"].iteritems():
+                msg = "%s%s:%s\n" % (msg,k,v)
+            self.write(msg)
+        elif op == "action":
+            user = self.get_argument("user",default="no")
+            a = self.get_argument("a",default="no")
+            msg = "no"
+            if checkpermission(user,a):
+                msg = "yes"
+            self.write(msg)
 
     def post(self, op):
         if not self.get_current_user():
@@ -215,10 +236,10 @@ class WeixinHandler(tornado.web.RequestHandler):
             payload['topcolor'] = "#FF0000"
             payload['template_id'] = confitem["alerttid"]
             r = weixin.send(payload)
-            logger.info("[Alert] touser: %s; eid: %s; msg: %s,%s; wxreply: %s" %
+            logger.info("[Alert] touser: %s; eid: %s; msg: %s,%s" %
                 (payload['touser'],
                 payload['url'], payload['data']['first']["value"],
-                payload['data']['keyword1']["value"],
+                payload['data']['keyword1']["value"]
                 ))
             if not r:
                 self.set_status(505)
@@ -294,7 +315,7 @@ def subtask(user,taskinfo):
     payload['touser'] = user
     payload['data'] = {}
     payload['data']['first'] = {"value":"执行成功","color":"#173177"}
-    payload['data']['keyword1'] = {"value":"微信接口","color":"#173177"}
+    payload['data']['keyword1'] = {"value":taskinfo,"color":"#173177"}
     payload['data']['keyword2'] = {"value":0,"color":"#173177"}
     indate = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime())
     payload['data']['keyword3'] = {"value":indate,"color":"#173177"}
@@ -314,43 +335,47 @@ def subtask(user,taskinfo):
             payload['data']['first']["value"] = "执行失败"
             payload['data']['keyword2']["value"] = response["msg"]
     elif actionName == "ssh":
-        response = actionssh(tinfo[1]," ".join(tinfo[2:]))
+        if not checkpermission(user, actionArgs[1]):
+            TaskRun.value -= 1
+            return
+        response = actionssh(actionArgs[0]," ".join(actionArgs[1:]))
         if response["code"] != 0:
             payload['data']['first']["value"] = "执行失败"
             payload['data']['keyword2']["value"] = response["code"]
-        payload['data']['remark']['value'] = response["msg"]
-    elif actionName == "svr":
-        shortSvrName = tinfo[1]
-        shortSvrAction = tinfo[2]
-        svrname = SvrName.get(shortSvrName, shortSvrName)
-        svraction = SvrAction.get(shortSvrAction, shortSvrAction)
-        if svrname == "memcached":
-            result = actionssh('memc', "service %s %s" % (svrname,svraction))
-        else:
-            result = actioncmd("service %s %s" % (svrname,svraction))
-        if result["code"] != 0:
-            payload['data']['first']["value"] = "执行失败"
-            payload['data']['keyword2']["value"] = result["msg"]
-    elif actionName == "cl":
-        result = actioncmd("/data/scripts/cl %s %s" % (actionArgs[0],actionArgs[1]))
-        if result["code"] != 0:
-            payload['data']['first']["value"] = "执行失败"
-            payload['data']['keyword2']["value"] = result["code"]
-        payload['data']['remark']['value'] = result["msg"]
+            payload['data']['remark']['value'] = result["err"]
+        payload['data']['remark']['value'] += response["msg"]
     elif actionName == "test":
         payload['data']['first']["value"] = "执行成功"
+    else:
+        script = "/data/scripts/localhost/%s" % actionName
+        if os.path.isfile(script):
+            if oct(S_IMODE(os.stat(script).st_mode)) != '0755':
+                os.chmod(script,0755)
+            result = actioncmd("%s %s" % (script," ".join(actionArgs)))
+            if result["code"] != 0:
+                payload['data']['first']["value"] = "执行失败"
+                payload['data']['keyword2']["value"] = result["code"]
+                payload['data']['remark']['value'] = result["err"]
+            payload['data']['remark']['value'] += result["msg"]
+    if payload['data']['keyword2']["value"] != 0:
+        logger.info("cmd[%s] %s" % (taskinfo,payload['data']['remark']['value']))
     r = weixin.send(payload)
     if not r:
         logger.error("task failed: %s\n" % taskinfo)
     TaskRun.value -= 1
 
 def checkpermission(user, action):
+    if action == "ssh":
+        return True
     if "admin" in confitem:
         if user in confitem["admin"]:
             return True
-    if action in confitem:
-        if user in confitem[action]:
-            return True
+    try:
+        confitem["action"][action].index(user)
+    except:
+        return False
+    else:
+        return True
     return False
 
 
@@ -367,7 +392,7 @@ class ResultCallback(CallbackBase):
     def v2_runner_on_failed(self, result, ignore_errors=False):
         if result._host.name not in ansibleResult:
             ansibleResult[result._host.name] = {}
-        ansibleResult[result._host.name] = result._result
+        ansibleResult[result._host.name] = result._result["stdout_lines"]
 
     def v2_runner_on_ok(self, result):
         if result._host.name not in ansibleResult:
@@ -414,17 +439,24 @@ def actionssh(host, cmd):
         remote_user = 'dale',
         gather_facts = 'no',
         tasks = [
-            dict(name='cmd runing',action=dict(module='script',args='/data/scripts/%s' % cmd))
+            dict(
+                name='cmd runing',
+                action=dict(module='script',args='/data/scripts/%s' % cmd),
+                environment = dict(
+                    OPS_Host = host,
+                ),
+            )
         ]
     )
-    r = dict(RetCode = 0, msg = "OK")
+    r = dict(RetCode = 0, msg = "")
     r["code"]=ansiblev2(play_source)
     if r['code'] != 0:
         logger.error("actionssh host: %s; cmd: %s; result: %d; info: %s" % (host, cmd, r['code'],ansibleResult))
-    r['msg'] = json.dumps(ansibleResult,indent=2,ensure_ascii=False)
-    #else:
-    #    for k,v in ansibleResult.iteritems():
-    #        r['msg'] = '%s%s: %s\n' % (r['msg'],k,v)
+    for k,v in ansibleResult.iteritems():
+        vv = v
+        if isinstance(v,list):
+            vv = "; ".join(v)
+        r['msg'] = "%s\n  %s\n%s" % (k,vv,r['msg'])
     return r
 
 def actioncmd(args):
@@ -441,10 +473,6 @@ def actioncmd(args):
     r["code"] = opipe.returncode
     return r
 
-def actionBw(str):
-    r = dict(code = 0, msg = "OK")
-    return r
-
 
 if __name__ == "__main__":
     try:
@@ -452,7 +480,6 @@ if __name__ == "__main__":
     except getopt.GetoptError, err:
         print str(err) # will print something like "option -a not recognized"
         sys.exit(2)
-    conf = "no"
     for o, a in opts:
         if o == "-h":
             print "%s -c config_file \n" % sys.argv[0]
@@ -462,16 +489,6 @@ if __name__ == "__main__":
     daemonize('/dev/null','/data/log/weixin/weixinsvr.out','/data/log/weixin/weixinsvr.err',MyOption['pidfile'])
     config = ConfigParser.ConfigParser()
     config.read(conf)
-    # global run_user
-    # try:
-    #     run_user = config.get('default', 'user')
-    # except:
-    #     run_user = MyOption['run_user']
-    # try:
-    #     uid = getpwnam(run_user).pw_uid
-    # except:
-    #     print "not have user: %s" % run_user
-    #     sys.exit(1)
     global weixin, confitem
     confitem = {}
     try:
@@ -489,11 +506,10 @@ if __name__ == "__main__":
     except:
         pass
     else:
+        confitem["action"] = {}
         for item in actions:
             action =item[0]
-            confitem[action] = {}
-            for user in item[1].split(","):
-                confitem[action][user] = 1
+            confitem["action"][action] = item[1].split(',')
     try:
         admins = config.get('default', 'admin')
     except:
@@ -505,6 +521,7 @@ if __name__ == "__main__":
     #global logger
     signal.signal(signal.SIGTERM,exit_handler)
     signal.signal(signal.SIGQUIT,exit_handler)
+    signal.signal(signal.SIGUSR2,action_handler)
     #os.environ['HOME'] = getpwnam(run_user).pw_dir
     #os.environ['USERNAME'] = run_user
     weixin = WeiXin(confitem["appid"],secret)
